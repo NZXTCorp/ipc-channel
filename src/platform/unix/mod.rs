@@ -73,7 +73,7 @@ lazy_static! {
 }
 
 // A global count used to create unique IDs
-static SHM_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
+static SHM_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub fn channel() -> Result<(OsIpcSender, OsIpcReceiver),UnixError> {
     let mut results = [0, 0];
@@ -1096,4 +1096,3 @@ struct linger {
     l_onoff: c_int,
     l_linger: c_int,
 }
-
