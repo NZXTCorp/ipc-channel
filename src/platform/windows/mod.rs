@@ -1106,7 +1106,7 @@ impl OsIpcSender {
     }
 
     /// Connect to a pipe server.
-    fn connect_named(pipe_name: &CString) -> Result<OsIpcSender,WinError> {
+    pub fn connect_named(pipe_name: &CString) -> Result<OsIpcSender,WinError> {
         unsafe {
             let handle =
                 kernel32::CreateFileA(pipe_name.as_ptr(),
@@ -1647,6 +1647,15 @@ impl OsIpcOneShotServer {
             },
             pipe_id.to_string()
         ))
+    }
+
+    pub fn new_named(pipe_name: &str) -> Result<OsIpcOneShotServer, Error> {
+        let name = try!(CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
+            .map_err(|err| Error::new(ErrorKind::Other, err)));
+        let receiver = try!(OsIpcReceiver::new_named(&name));
+        Ok(OsIpcOneShotServer {
+            receiver: receiver
+        })
     }
 
     pub fn accept(self) -> Result<(OsIpcReceiver,

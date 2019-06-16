@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::cmp::min;
 use std::fmt::{self, Debug, Formatter};
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
@@ -161,6 +161,17 @@ impl<T> IpcSender<T> where T: Serialize {
     pub fn connect(name: String) -> Result<IpcSender<T>,Error> {
         Ok(IpcSender {
             os_sender: try!(OsIpcSender::connect(name)),
+            phantom: PhantomData,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn connect_named(name: String) -> Result<IpcSender<T>,Error> {
+        use std::ffi::CString;
+        let pipe_name = try!(CString::new(format!("\\\\.\\pipe\\{}", name))
+            .map_err(|err| Error::new(ErrorKind::Other, err)));
+        Ok(IpcSender {
+            os_sender: try!(OsIpcSender::connect_named(&pipe_name)),
             phantom: PhantomData,
         })
     }
@@ -442,6 +453,15 @@ impl<T> IpcOneShotServer<T> where T: for<'de> Deserialize<'de> + Serialize {
             os_server: os_server,
             phantom: PhantomData,
         }, name))
+    }
+
+#[cfg(target_os = "windows")]
+    pub fn new_named(pipe_name: &str) -> Result<IpcOneShotServer<T>, Error> {
+        let os_server = try!(OsIpcOneShotServer::new_named(pipe_name));
+        Ok(IpcOneShotServer {
+            os_server: os_server,
+            phantom: PhantomData,
+        })
     }
 
     pub fn accept(self) -> Result<(IpcReceiver<T>,T), bincode::Error> {
