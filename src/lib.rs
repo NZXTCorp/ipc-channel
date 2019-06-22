@@ -42,8 +42,6 @@ extern crate futures;
 
 #[cfg(all(not(feature = "force-inprocess"), target_os = "windows"))]
 extern crate winapi;
-#[cfg(all(not(feature = "force-inprocess"), target_os = "windows"))]
-extern crate kernel32;
 
 pub mod ipc;
 pub mod platform;

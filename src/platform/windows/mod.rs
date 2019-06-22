@@ -9,7 +9,6 @@
 
 use serde;
 use bincode;
-use kernel32;
 use libc::intptr_t;
 use std::cell::{Cell, RefCell};
 use std::cmp::PartialEq;
@@ -25,15 +24,34 @@ use std::ptr;
 use std::slice;
 use std::thread;
 use uuid::Uuid;
-use winapi::{HANDLE, INVALID_HANDLE_VALUE, LPVOID};
-use winapi;
+use winapi::shared::basetsd::ULONG_PTR;
+use winapi::shared::ntdef::{HANDLE, WCHAR};
+use winapi::shared::minwindef::{DWORD, FALSE, LPVOID, TRUE, ULONG};
+use winapi::shared::winerror::{ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, 
+    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_PIPE_CONNECTED};
+use winapi::um::errhandlingapi::GetLastError;
+use winapi::um::fileapi::{CreateFileA, OPEN_EXISTING, ReadFile, WriteFile};
+use winapi::um::handleapi::{CloseHandle, DuplicateHandle, INVALID_HANDLE_VALUE};
+use winapi::um::ioapiset::{CancelIoEx, CreateIoCompletionPort,
+    GetOverlappedResult, GetQueuedCompletionStatus};
+use winapi::um::memoryapi::{FILE_MAP_ALL_ACCESS, MapViewOfFile, UnmapViewOfFile};
+use winapi::um::minwinbase::OVERLAPPED;
+use winapi::um::namedpipeapi::ConnectNamedPipe;
+use winapi::um::processthreadsapi::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
+use winapi::um::winbase::{CreateFileMappingA, CreateNamedPipeA, FILE_FLAG_OVERLAPPED,
+    FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_FROM_SYSTEM, FormatMessageW,
+    GetNamedPipeServerProcessId, INFINITE, PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
+use winapi::um::winnt::{DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, PAGE_READWRITE, PROCESS_DUP_HANDLE,
+    SEC_COMMIT};
 
 mod aliased_cell;
 use self::aliased_cell::AliasedCell;
 
 lazy_static! {
-    static ref CURRENT_PROCESS_ID: winapi::ULONG = unsafe { kernel32::GetCurrentProcessId() };
-    static ref CURRENT_PROCESS_HANDLE: WinHandle = WinHandle::new(unsafe { kernel32::GetCurrentProcess() });
+    static ref CURRENT_PROCESS_ID: ULONG = unsafe { GetCurrentProcessId() };
+    static ref CURRENT_PROCESS_HANDLE: WinHandle = WinHandle::new(unsafe { GetCurrentProcess() });
 }
 
 #[cfg(feature = "win32-trace")]
@@ -60,13 +78,6 @@ const MAX_FRAGMENT_SIZE: usize = 64 * 1024;
 
 /// Size of the pipe's write buffer, with excess room for the header.
 const PIPE_BUFFER_SIZE: usize = MAX_FRAGMENT_SIZE + 4 * 1024;
-
-#[allow(non_snake_case)]
-fn GetLastError() -> u32 {
-    unsafe {
-        kernel32::GetLastError()
-    }
-}
 
 pub fn channel() -> Result<(OsIpcSender, OsIpcReceiver),WinError> {
     let pipe_id = make_pipe_id();
@@ -230,7 +241,7 @@ fn make_pipe_name(pipe_id: &Uuid) -> CString {
 ///
 /// Unlike win32 DuplicateHandle, this will preserve INVALID_HANDLE_VALUE (which is
 /// also the pseudohandle for the current process).
-fn dup_handle_to_process_with_flags(handle: &WinHandle, other_process: &WinHandle, flags: winapi::DWORD)
+fn dup_handle_to_process_with_flags(handle: &WinHandle, other_process: &WinHandle, flags: DWORD)
                                            -> Result<WinHandle, WinError>
 {
     if !handle.is_valid() {
@@ -239,10 +250,10 @@ fn dup_handle_to_process_with_flags(handle: &WinHandle, other_process: &WinHandl
 
     unsafe {
         let mut new_handle: HANDLE = INVALID_HANDLE_VALUE;
-        let ok = kernel32::DuplicateHandle(CURRENT_PROCESS_HANDLE.as_raw(), handle.as_raw(),
-                                           other_process.as_raw(), &mut new_handle,
-                                           0, winapi::FALSE, flags);
-        if ok == winapi::FALSE {
+        let ok = DuplicateHandle(CURRENT_PROCESS_HANDLE.as_raw(), handle.as_raw(),
+                                 other_process.as_raw(), &mut new_handle,
+                                 0, FALSE, flags);
+        if ok == FALSE {
             Err(WinError::last("DuplicateHandle"))
         } else {
             Ok(WinHandle::new(new_handle))
@@ -257,13 +268,13 @@ fn dup_handle(handle: &WinHandle) -> Result<WinHandle,WinError> {
 
 /// Duplicate a handle to the target process.
 fn dup_handle_to_process(handle: &WinHandle, other_process: &WinHandle) -> Result<WinHandle,WinError> {
-    dup_handle_to_process_with_flags(handle, other_process, winapi::DUPLICATE_SAME_ACCESS)
+    dup_handle_to_process_with_flags(handle, other_process, DUPLICATE_SAME_ACCESS)
 }
 
 /// Duplicate a handle to the target process, closing the source handle.
 fn move_handle_to_process(handle: WinHandle, other_process: &WinHandle) -> Result<WinHandle,WinError> {
     let result = dup_handle_to_process_with_flags(&handle, other_process,
-                                                  winapi::DUPLICATE_CLOSE_SOURCE | winapi::DUPLICATE_SAME_ACCESS);
+                                                  DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS);
     // Since the handle was moved to another process, the original is no longer valid;
     // so we probably shouldn't try to close it explicitly?
     mem::forget(handle);
@@ -282,7 +293,7 @@ impl Drop for WinHandle {
     fn drop(&mut self) {
         unsafe {
             if self.is_valid() {
-                let result = kernel32::CloseHandle(self.h);
+                let result = CloseHandle(self.h);
                 assert!(thread::panicking() || result != 0);
             }
         }
@@ -338,7 +349,7 @@ impl WinHandle {
 }
 
 /// Helper struct for all data being aliased by the kernel during async reads.
-#[derive(Debug)]
+//#[derive(Debug)]
 struct AsyncData {
     /// File handle of the pipe on which the async operation is performed.
     handle: WinHandle,
@@ -348,7 +359,7 @@ struct AsyncData {
     /// This must be on the heap, in order for its memory location --
     /// which is registered in the kernel during an async read --
     /// to remain stable even when the enclosing structure is passed around.
-    ov: Box<winapi::OVERLAPPED>,
+    ov: Box<OVERLAPPED>,
 
     /// Buffer for the kernel to store the results of the async read operation.
     ///
@@ -357,6 +368,14 @@ struct AsyncData {
     /// If part of the vector is already filled, that is left in place;
     /// the new data will only be written to the unused space.
     buf: Vec<u8>,
+}
+
+// OVERLAPPED doesn't implement Debug so can't derive it, this should do but probably needs better formatting
+impl std::fmt::Debug for AsyncData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "AsyncData {{ handle: {:?}, OVERLAPPED {{ Internal: {}, InternalHigh: {}, Offset: {}, OffsetHigh: {} }} buf: {:?} }}", 
+            self.handle, self.ov.Internal, self.ov.InternalHigh, unsafe{ self.ov.u.s().Offset }, unsafe{ self.ov.u.s().OffsetHigh }, self.buf)
+    }
 }
 
 /// Main object keeping track of a receive handle and its associated state.
@@ -472,10 +491,10 @@ impl MessageReader {
     /// and the caller should not attempt waiting for completion.
     fn issue_async_cancel(&mut self) {
         unsafe {
-            let status = kernel32::CancelIoEx(self.async.as_ref().unwrap().alias().handle.as_raw(),
-                                              self.async.as_mut().unwrap().alias_mut().ov.deref_mut());
+            let status = CancelIoEx(self.async.as_ref().unwrap().alias().handle.as_raw(),
+                                    self.async.as_mut().unwrap().alias_mut().ov.deref_mut());
 
-            if status == winapi::FALSE {
+            if status == FALSE {
                 // A cancel operation is not expected to fail.
                 // If it does, callers are not prepared for that -- so we have to bail.
                 //
@@ -490,7 +509,7 @@ impl MessageReader {
                 //
                 // In that case, we can safely free the async data right now;
                 // and the caller should not attempt to wait for completion.
-                assert!(GetLastError() == winapi::ERROR_NOT_FOUND);
+                assert!(GetLastError() == ERROR_NOT_FOUND);
 
                 let async_data = self.async.take().unwrap().into_inner();
                 self.handle = async_data.handle;
@@ -559,11 +578,11 @@ impl MessageReader {
             let ok = {
                 let async_data = self.async.as_mut().unwrap().alias_mut();
                 let remaining_buf = &mut async_data.buf[buf_len..];
-                kernel32::ReadFile(async_data.handle.as_raw(),
-                                   remaining_buf.as_mut_ptr() as LPVOID,
-                                   remaining_buf.len() as u32,
-                                   &mut bytes_read,
-                                   async_data.ov.deref_mut())
+                ReadFile(async_data.handle.as_raw(),
+                         remaining_buf.as_mut_ptr() as LPVOID,
+                         remaining_buf.len() as u32,
+                         &mut bytes_read,
+                         async_data.ov.deref_mut())
             };
 
             // Reset the vector to only expose the already filled part.
@@ -581,7 +600,7 @@ impl MessageReader {
             // which would bear some risk of getting out of sync.
             self.async.as_mut().unwrap().alias_mut().buf.set_len(buf_len);
 
-            let result = if ok == winapi::FALSE {
+            let result = if ok == FALSE {
                 Err(GetLastError())
             } else {
                 Ok(())
@@ -597,10 +616,10 @@ impl MessageReader {
                 // handle is part of, meaning that we don't have to do any
                 // special handling for sync-completed operations.
                 Ok(()) |
-                Err(winapi::ERROR_IO_PENDING) => {
+                Err(ERROR_IO_PENDING) => {
                     Ok(())
                 },
-                Err(winapi::ERROR_BROKEN_PIPE) => {
+                Err(ERROR_BROKEN_PIPE) => {
                     win32_trace!("[$ {:?}] BROKEN_PIPE straight from ReadFile", self.handle);
 
                     let async_data = self.async.take().unwrap().into_inner();
@@ -649,7 +668,7 @@ impl MessageReader {
 
         match io_result {
             Ok(()) => {}
-            Err(WinError::WindowsResult(winapi::ERROR_BROKEN_PIPE)) => {
+            Err(WinError::WindowsResult(ERROR_BROKEN_PIPE)) => {
                 // Remote end closed the channel.
                 return Err(WinError::ChannelClosed);
             }
@@ -657,7 +676,7 @@ impl MessageReader {
         }
 
         let nbytes = ov.InternalHigh as u32;
-        let offset = ov.Offset;
+        let offset = ov.u.s().Offset;
 
         assert!(offset == 0);
 
@@ -691,16 +710,16 @@ impl MessageReader {
             // Get the overlapped result, blocking if we need to.
             let mut nbytes: u32 = 0;
             let block = match blocking_mode {
-                BlockingMode::Blocking => winapi::TRUE,
-                BlockingMode::Nonblocking => winapi::FALSE,
+                BlockingMode::Blocking => TRUE,
+                BlockingMode::Nonblocking => FALSE,
             };
-            let ok = kernel32::GetOverlappedResult(self.async.as_ref().unwrap().alias().handle.as_raw(),
-                                                   self.async.as_mut().unwrap().alias_mut().ov.deref_mut(),
-                                                   &mut nbytes,
-                                                   block);
-            let io_result = if ok == winapi::FALSE {
+            let ok = GetOverlappedResult(self.async.as_ref().unwrap().alias().handle.as_raw(),
+                                         self.async.as_mut().unwrap().alias_mut().ov.deref_mut(),
+                                         &mut nbytes,
+                                         block);
+            let io_result = if ok == FALSE {
                 let err = GetLastError();
-                if blocking_mode == BlockingMode::Nonblocking && err == winapi::ERROR_IO_INCOMPLETE {
+                if blocking_mode == BlockingMode::Nonblocking && err == ERROR_IO_INCOMPLETE {
                     // Async read hasn't completed yet.
                     // Inform the caller, while keeping the read in flight.
                     return Err(WinError::NoData);
@@ -784,11 +803,11 @@ impl MessageReader {
         unsafe {
             assert!(self.entry_id.is_none());
 
-            let completion_key = self.handle.as_raw() as winapi::ULONG_PTR;
-            let ret = kernel32::CreateIoCompletionPort(self.handle.as_raw(),
-                                                       iocp.as_raw(),
-                                                       completion_key,
-                                                       0);
+            let completion_key = self.handle.as_raw() as ULONG_PTR;
+            let ret = CreateIoCompletionPort(self.handle.as_raw(),
+                                             iocp.as_raw(),
+                                             completion_key,
+                                             0);
             if ret.is_null() {
                 return Err(WinError::last("CreateIoCompletionPort"));
             }
@@ -821,14 +840,14 @@ impl MessageReader {
                     // (i.e. before supplying the expected amount of data),
                     // don't report that as a "sender closed" condition on the main channel:
                     // rather, fail with the actual raw error code.
-                    return Err(WinError::from_system(winapi::ERROR_BROKEN_PIPE, "ReadFile"));
+                    return Err(WinError::from_system(ERROR_BROKEN_PIPE, "ReadFile"));
                 }
                 Err(err) => return Err(err),
                 Ok(()) => {}
             };
             match self.fetch_async_result(BlockingMode::Blocking) {
                 Err(WinError::ChannelClosed) => {
-                    return Err(WinError::from_system(winapi::ERROR_BROKEN_PIPE, "ReadFile"))
+                    return Err(WinError::from_system(ERROR_BROKEN_PIPE, "ReadFile"))
                 }
                 Err(err) => return Err(err),
                 Ok(()) => {}
@@ -867,12 +886,12 @@ fn write_buf(handle: &WinHandle, bytes: &[u8], atomic: AtomicMode) -> Result<(),
         let mut sz: u32 = 0;
         let bytes_to_write = &bytes[written..];
         unsafe {
-            if kernel32::WriteFile(handle.as_raw(),
-                                   bytes_to_write.as_ptr() as LPVOID,
-                                   bytes_to_write.len() as u32,
-                                   &mut sz,
-                                   ptr::null_mut())
-                == winapi::FALSE
+            if WriteFile(handle.as_raw(),
+                         bytes_to_write.as_ptr() as LPVOID,
+                         bytes_to_write.len() as u32,
+                         &mut sz,
+                         ptr::null_mut())
+                == FALSE
             {
                 return Err(WinError::last("WriteFile"));
             }
@@ -931,15 +950,15 @@ impl OsIpcReceiver {
         unsafe {
             // create the pipe server
             let handle =
-                kernel32::CreateNamedPipeA(pipe_name.as_ptr(),
-                                           winapi::PIPE_ACCESS_INBOUND | winapi::FILE_FLAG_OVERLAPPED,
-                                           winapi::PIPE_TYPE_BYTE | winapi::PIPE_READMODE_BYTE | winapi::PIPE_REJECT_REMOTE_CLIENTS,
-                                           // 1 max instance of this pipe
-                                           1,
-                                           // out/in buffer sizes
-                                           0, PIPE_BUFFER_SIZE as u32,
-                                           0, // default timeout for WaitNamedPipe (0 == 50ms as default)
-                                           ptr::null_mut());
+                CreateNamedPipeA(pipe_name.as_ptr(),
+                                 PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                                 // 1 max instance of this pipe
+                                 1,
+                                 // out/in buffer sizes
+                                 0, PIPE_BUFFER_SIZE as u32,
+                                 0, // default timeout for WaitNamedPipe (0 == 50ms as default)
+                                 ptr::null_mut());
             if handle == INVALID_HANDLE_VALUE {
                 return Err(WinError::last("CreateNamedPipeA"));
             }
@@ -1019,14 +1038,14 @@ impl OsIpcReceiver {
             let handle = &reader_borrow.handle;
             // Boxing this to get a stable address is not strictly necesssary here,
             // since we are not moving the local variable around -- but better safe than sorry...
-            let mut ov = AliasedCell::new(Box::new(mem::zeroed::<winapi::OVERLAPPED>()));
-            let ok = kernel32::ConnectNamedPipe(handle.as_raw(), ov.alias_mut().deref_mut());
+            let mut ov = AliasedCell::new(Box::new(mem::zeroed::<OVERLAPPED>()));
+            let ok = ConnectNamedPipe(handle.as_raw(), ov.alias_mut().deref_mut());
 
             // we should always get FALSE with async IO
-            assert!(ok == winapi::FALSE);
+            assert!(ok == FALSE);
             let result = match GetLastError() {
                 // did we successfully connect? (it's reported as an error [ok==false])
-                winapi::ERROR_PIPE_CONNECTED => {
+                ERROR_PIPE_CONNECTED => {
                     win32_trace!("[$ {:?}] accept (PIPE_CONNECTED)", handle.as_raw());
                     Ok(())
                 },
@@ -1036,16 +1055,16 @@ impl OsIpcReceiver {
                 // a Connect here will get ERROR_NO_DATA -- but there may be data in
                 // the pipe that we'll be able to read.  So we need to go do some reads
                 // like normal and wait until ReadFile gives us ERROR_NO_DATA.
-                winapi::ERROR_NO_DATA => {
+                ERROR_NO_DATA => {
                     win32_trace!("[$ {:?}] accept (ERROR_NO_DATA)", handle.as_raw());
                     Ok(())
                 },
 
                 // the connect is pending; wait for it to complete
-                winapi::ERROR_IO_PENDING => {
+                ERROR_IO_PENDING => {
                     let mut nbytes: u32 = 0;
-                    let ok = kernel32::GetOverlappedResult(handle.as_raw(), ov.alias_mut().deref_mut(), &mut nbytes, winapi::TRUE);
-                    if ok == winapi::FALSE {
+                    let ok = GetOverlappedResult(handle.as_raw(), ov.alias_mut().deref_mut(), &mut nbytes, TRUE);
+                    if ok == FALSE {
                         return Err(WinError::last("GetOverlappedResult[ConnectNamedPipe]"));
                     }
                     Ok(())
@@ -1109,13 +1128,13 @@ impl OsIpcSender {
     pub fn connect_named(pipe_name: &CString) -> Result<OsIpcSender,WinError> {
         unsafe {
             let handle =
-                kernel32::CreateFileA(pipe_name.as_ptr(),
-                                      winapi::GENERIC_WRITE,
-                                      0,
-                                      ptr::null_mut(), // lpSecurityAttributes
-                                      winapi::OPEN_EXISTING,
-                                      winapi::FILE_ATTRIBUTE_NORMAL,
-                                      ptr::null_mut());
+                CreateFileA(pipe_name.as_ptr(),
+                            GENERIC_WRITE,
+                            0,
+                            ptr::null_mut(), // lpSecurityAttributes
+                            OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL,
+                            ptr::null_mut());
             if handle == INVALID_HANDLE_VALUE {
                 return Err(WinError::last("CreateFileA"));
             }
@@ -1126,26 +1145,26 @@ impl OsIpcSender {
         }
     }
 
-    fn get_pipe_server_process_id(&self) -> Result<winapi::ULONG,WinError> {
+    fn get_pipe_server_process_id(&self) -> Result<ULONG,WinError> {
         unsafe {
-            let mut server_pid: winapi::ULONG = 0;
-            if kernel32::GetNamedPipeServerProcessId(self.handle.as_raw(), &mut server_pid) == winapi::FALSE {
+            let mut server_pid: ULONG = 0;
+            if GetNamedPipeServerProcessId(self.handle.as_raw(), &mut server_pid) == FALSE {
                 return Err(WinError::last("GetNamedPipeServerProcessId"));
             }
             Ok(server_pid)
         }
     }
 
-    fn get_pipe_server_process_handle_and_pid(&self) -> Result<(WinHandle, winapi::ULONG),WinError> {
+    fn get_pipe_server_process_handle_and_pid(&self) -> Result<(WinHandle, ULONG),WinError> {
         unsafe {
             let server_pid = try!(self.get_pipe_server_process_id());
             if server_pid == *CURRENT_PROCESS_ID {
                 return Ok((WinHandle::new(CURRENT_PROCESS_HANDLE.as_raw()), server_pid));
             }
 
-            let raw_handle = kernel32::OpenProcess(winapi::PROCESS_DUP_HANDLE,
-                                                   winapi::FALSE,
-                                                   server_pid as winapi::DWORD);
+            let raw_handle = OpenProcess(PROCESS_DUP_HANDLE,
+                                         FALSE,
+                                         server_pid as DWORD);
             if raw_handle.is_null() {
                 return Err(WinError::last("OpenProcess"));
             }
@@ -1329,10 +1348,10 @@ impl Drop for OsIpcReceiverSet {
 impl OsIpcReceiverSet {
     pub fn new() -> Result<OsIpcReceiverSet,WinError> {
         unsafe {
-            let iocp = kernel32::CreateIoCompletionPort(INVALID_HANDLE_VALUE,
-                                                        ptr::null_mut(),
-                                                        0 as winapi::ULONG_PTR,
-                                                        0);
+            let iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE,
+                                              ptr::null_mut(),
+                                              0 as ULONG_PTR,
+                                              0);
             if iocp.is_null() {
                 return Err(WinError::last("CreateIoCompletionPort"));
             }
@@ -1392,16 +1411,16 @@ impl OsIpcReceiverSet {
     fn fetch_iocp_result(&mut self) -> Result<(MessageReader, Result<(), WinError>), WinError> {
         unsafe {
             let mut nbytes: u32 = 0;
-            let mut completion_key = INVALID_HANDLE_VALUE as winapi::ULONG_PTR;
-            let mut ov_ptr: *mut winapi::OVERLAPPED = ptr::null_mut();
+            let mut completion_key = INVALID_HANDLE_VALUE as ULONG_PTR;
+            let mut ov_ptr: *mut OVERLAPPED = ptr::null_mut();
             // XXX use GetQueuedCompletionStatusEx to dequeue multiple CP at once!
-            let ok = kernel32::GetQueuedCompletionStatus(self.iocp.as_raw(),
-                                                         &mut nbytes,
-                                                         &mut completion_key,
-                                                         &mut ov_ptr,
-                                                         winapi::INFINITE);
+            let ok = GetQueuedCompletionStatus(self.iocp.as_raw(),
+                                               &mut nbytes,
+                                               &mut completion_key,
+                                               &mut ov_ptr,
+                                               INFINITE);
             win32_trace!("[# {:?}] GetQueuedCS -> ok:{} nbytes:{} key:{:?}", self.iocp.as_raw(), ok, nbytes, completion_key);
-            let io_result = if ok == winapi::FALSE {
+            let io_result = if ok == FALSE {
                 let err = WinError::last("GetQueuedCompletionStatus");
 
                 // If the OVERLAPPED result is NULL, then the
@@ -1418,13 +1437,13 @@ impl OsIpcReceiverSet {
             };
 
             assert!(!ov_ptr.is_null());
-            assert!(completion_key != INVALID_HANDLE_VALUE as winapi::ULONG_PTR);
+            assert!(completion_key != INVALID_HANDLE_VALUE as ULONG_PTR);
 
             // Find the matching receiver
             let (reader_index, _) = self.readers.iter().enumerate()
                                     .find(|&(_, ref reader)| {
                                         let raw_handle = reader.async.as_ref().unwrap().alias().handle.as_raw();
-                                        raw_handle as winapi::ULONG_PTR == completion_key
+                                        raw_handle as ULONG_PTR == completion_key
                                     })
                                     .expect("Windows IPC ReceiverSet got notification for a receiver it doesn't know about");
 
@@ -1531,7 +1550,7 @@ unsafe impl Sync for OsIpcSharedMemory {}
 impl Drop for OsIpcSharedMemory {
     fn drop(&mut self) {
         unsafe {
-            let result = kernel32::UnmapViewOfFile(self.ptr as LPVOID);
+            let result = UnmapViewOfFile(self.ptr as LPVOID);
             assert!(thread::panicking() || result != 0);
         }
     }
@@ -1575,11 +1594,11 @@ impl OsIpcSharedMemory {
             let (lhigh, llow) = (length.checked_shr(32).unwrap_or(0) as u32,
                                  (length & 0xffffffff) as u32);
             let handle =
-                kernel32::CreateFileMappingA(INVALID_HANDLE_VALUE,
-                                             ptr::null_mut(),
-                                             winapi::PAGE_READWRITE | winapi::SEC_COMMIT,
-                                             lhigh, llow,
-                                             ptr::null_mut());
+                CreateFileMappingA(INVALID_HANDLE_VALUE,
+                                   ptr::null_mut(),
+                                   PAGE_READWRITE | SEC_COMMIT,
+                                   lhigh, llow,
+                                   ptr::null_mut());
             if handle == INVALID_HANDLE_VALUE {
                 return Err(WinError::last("CreateFileMapping"));
             }
@@ -1596,9 +1615,9 @@ impl OsIpcSharedMemory {
     // when finished.
     fn from_handle(handle: WinHandle, length: usize) -> Result<OsIpcSharedMemory,WinError> {
         unsafe {
-            let address = kernel32::MapViewOfFile(handle.as_raw(),
-                                                  winapi::FILE_MAP_ALL_ACCESS,
-                                                  0, 0, 0);
+            let address = MapViewOfFile(handle.as_raw(),
+                                        FILE_MAP_ALL_ACCESS,
+                                        0, 0, 0);
             if address.is_null() {
                 return Err(WinError::last("MapViewOfFile"));
             }
@@ -1717,21 +1736,21 @@ impl WinError {
     pub fn error_string(errnum: u32) -> String {
         // This value is calculated from the macro
         // MAKELANGID(LANG_SYSTEM_DEFAULT, SUBLANG_SYS_DEFAULT)
-        let lang_id = 0x0800 as winapi::DWORD;
-        let mut buf = [0 as winapi::WCHAR; 2048];
+        let lang_id = 0x0800 as DWORD;
+        let mut buf = [0 as WCHAR; 2048];
 
         unsafe {
-            let res = kernel32::FormatMessageW(winapi::FORMAT_MESSAGE_FROM_SYSTEM |
-                                               winapi::FORMAT_MESSAGE_IGNORE_INSERTS,
-                                               ptr::null_mut(),
-                                               errnum as winapi::DWORD,
-                                               lang_id,
-                                               buf.as_mut_ptr(),
-                                               buf.len() as winapi::DWORD,
-                                               ptr::null_mut()) as usize;
+            let res = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM |
+                                     FORMAT_MESSAGE_IGNORE_INSERTS,
+                                     ptr::null_mut(),
+                                     errnum as DWORD,
+                                     lang_id,
+                                     buf.as_mut_ptr(),
+                                     buf.len() as DWORD,
+                                     ptr::null_mut()) as usize;
             if res == 0 {
                 // Sometimes FormatMessageW can fail e.g. system doesn't like lang_id,
-                let fm_err = kernel32::GetLastError();
+                let fm_err = GetLastError();
                 return format!("OS Error {} (FormatMessageW() returned error {})",
                                errnum, fm_err);
             }
@@ -1753,7 +1772,7 @@ impl WinError {
     }
 
     fn last(f: &str) -> WinError {
-        WinError::from_system(GetLastError(), f)
+        WinError::from_system(unsafe { GetLastError() }, f)
     }
 
     pub fn channel_is_closed(&self) -> bool {
@@ -1774,7 +1793,7 @@ impl From<WinError> for Error {
                 // This is the error code we originally got from the Windows API
                 // to signal the "channel closed" (no sender) condition --
                 // so hand it back to the Windows API to create an appropriate `Error` value.
-                Error::from_raw_os_error(winapi::ERROR_BROKEN_PIPE as i32)
+                Error::from_raw_os_error(ERROR_BROKEN_PIPE as i32)
             },
             WinError::NoData => {
                 Error::new(ErrorKind::WouldBlock, "Win channel has no data available")
