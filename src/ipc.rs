@@ -89,6 +89,11 @@ impl<T> IpcReceiver<T> where T: for<'de> Deserialize<'de> + Serialize {
             os_receiver: self.os_receiver,
         }
     }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_sender_process_id(&self) -> Result<u32, bincode::Error> {
+        Ok(try!(self.os_receiver.get_sender_process_id()))
+    }
 }
 
 #[cfg(feature = "async")]

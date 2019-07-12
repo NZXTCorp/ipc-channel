@@ -40,8 +40,8 @@ use winapi::um::namedpipeapi::ConnectNamedPipe;
 use winapi::um::processthreadsapi::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
 use winapi::um::winbase::{CreateFileMappingA, CreateNamedPipeA, FILE_FLAG_OVERLAPPED,
     FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_FROM_SYSTEM, FormatMessageW,
-    GetNamedPipeServerProcessId, INFINITE, PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
+    GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, INFINITE,
+    PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
 use winapi::um::winnt::{DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
     FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, PAGE_READWRITE, PROCESS_DUP_HANDLE,
     SEC_COMMIT};
@@ -1111,6 +1111,18 @@ impl OsIpcReceiver {
     /// This is used for receiving data from the out-of-band big data buffer.
     fn recv_raw(self, size: usize) -> Result<Vec<u8>, WinError> {
         self.reader.into_inner().read_raw_sized(size)
+    }
+
+    pub fn get_sender_process_id(&self) -> Result<ULONG, WinError> {
+        unsafe {
+            let reader_borrow = self.reader.borrow();
+            let handle = &reader_borrow.handle;
+            let mut process_id = 0;
+            if GetNamedPipeClientProcessId(handle.as_raw(), &mut process_id) == FALSE {
+                return Err(WinError::last("GetNamedPipeClientProcessId"));
+            }
+            Ok(process_id)
+        }
     }
 }
 
