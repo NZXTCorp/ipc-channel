@@ -461,6 +461,15 @@ impl<T> IpcOneShotServer<T> where T: for<'de> Deserialize<'de> + Serialize {
     }
 
 #[cfg(target_os = "windows")]
+    pub fn new_with_security(security_attributes: &mut winapi::um::minwinbase::SECURITY_ATTRIBUTES) -> Result<(IpcOneShotServer<T>, String),Error> {
+        let (os_server, name) = try!(OsIpcOneShotServer::new_with_security(security_attributes));
+        Ok((IpcOneShotServer {
+            os_server: os_server,
+            phantom: PhantomData,
+        }, name))
+    }
+
+#[cfg(target_os = "windows")]
     pub fn new_named(pipe_name: &str) -> Result<IpcOneShotServer<T>, Error> {
         let os_server = try!(OsIpcOneShotServer::new_named(pipe_name));
         Ok(IpcOneShotServer {

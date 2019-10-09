@@ -1703,6 +1703,19 @@ impl OsIpcOneShotServer {
         ))
     }
 
+    pub fn new_with_security(security_attributes: &mut SECURITY_ATTRIBUTES) -> Result<(OsIpcOneShotServer, String), WinError> {
+        let pipe_id = make_pipe_id();
+        let pipe_name = make_pipe_name(&pipe_id);
+        let receiver = try!(OsIpcReceiver::new_named_with_security(&pipe_name, security_attributes));
+        Ok((
+            OsIpcOneShotServer {
+                receiver: receiver,
+            },
+            pipe_id.to_string()
+        ))
+
+    }
+
     pub fn new_named(pipe_name: &str) -> Result<OsIpcOneShotServer, Error> {
         let name = try!(CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
             .map_err(|err| Error::new(ErrorKind::Other, err)));
