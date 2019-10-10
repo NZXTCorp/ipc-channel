@@ -8,12 +8,12 @@
 // except according to those terms.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread;
 
+use ipc::OpaqueIpcReceiver;
 use ipc::{self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, OpaqueIpcMessage};
-use ipc::{OpaqueIpcReceiver};
 use serde::{Deserialize, Serialize};
 
 lazy_static! {
@@ -39,31 +39,35 @@ impl RouterProxy {
 
     pub fn add_route(&self, receiver: OpaqueIpcReceiver, callback: RouterHandler) {
         let comm = self.comm.lock().unwrap();
-        comm.msg_sender.send(RouterMsg::AddRoute(receiver, callback)).unwrap();
+        comm.msg_sender
+            .send(RouterMsg::AddRoute(receiver, callback))
+            .unwrap();
         comm.wakeup_sender.send(()).unwrap();
     }
 
     /// A convenience function to route an `IpcReceiver<T>` to an existing `Sender<T>`.
-    pub fn route_ipc_receiver_to_mpsc_sender<T>(&self,
-                                                ipc_receiver: IpcReceiver<T>,
-                                                mpsc_sender: Sender<T>)
-                                                where T: for<'de> Deserialize<'de> +
-                                                         Serialize +
-                                                         Send +
-                                                         'static {
-        self.add_route(ipc_receiver.to_opaque(), Box::new(move |message| {
-            drop(mpsc_sender.send(message.to::<T>().unwrap()))
-        }))
+    pub fn route_ipc_receiver_to_mpsc_sender<T>(
+        &self,
+        ipc_receiver: IpcReceiver<T>,
+        mpsc_sender: Sender<T>,
+    ) where
+        T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
+    {
+        self.add_route(
+            ipc_receiver.to_opaque(),
+            Box::new(move |message| drop(mpsc_sender.send(message.to::<T>().unwrap()))),
+        )
     }
 
     /// A convenience function to route an `IpcReceiver<T>` to a `Receiver<T>`: the most common
     /// use of a `Router`.
-    pub fn route_ipc_receiver_to_new_mpsc_receiver<T>(&self, ipc_receiver: IpcReceiver<T>)
-                                                  -> Receiver<T>
-                                                  where T: for<'de> Deserialize<'de> +
-                                                           Serialize +
-                                                           Send +
-                                                           'static {
+    pub fn route_ipc_receiver_to_new_mpsc_receiver<T>(
+        &self,
+        ipc_receiver: IpcReceiver<T>,
+    ) -> Receiver<T>
+    where
+        T: for<'de> Deserialize<'de> + Serialize + Send + 'static,
+    {
         let (mpsc_sender, mpsc_receiver) = mpsc::channel();
         self.route_ipc_receiver_to_mpsc_sender(ipc_receiver, mpsc_sender);
         mpsc_receiver
@@ -79,7 +83,7 @@ struct Router {
     msg_receiver: Receiver<RouterMsg>,
     msg_wakeup_id: u64,
     ipc_receiver_set: IpcReceiverSet,
-    handlers: HashMap<u64,RouterHandler>,
+    handlers: HashMap<u64, RouterHandler>,
 }
 
 impl Router {
@@ -105,9 +109,8 @@ impl Router {
                     IpcSelectionResult::MessageReceived(id, _) if id == self.msg_wakeup_id => {
                         match self.msg_receiver.recv().unwrap() {
                             RouterMsg::AddRoute(receiver, handler) => {
-                                let new_receiver_id = self.ipc_receiver_set
-                                                          .add_opaque(receiver)
-                                                          .unwrap();
+                                let new_receiver_id =
+                                    self.ipc_receiver_set.add_opaque(receiver).unwrap();
                                 self.handlers.insert(new_receiver_id, handler);
                             }
                         }
@@ -116,7 +119,7 @@ impl Router {
                         self.handlers.get_mut(&id).unwrap()(message)
                     }
                     IpcSelectionResult::ChannelClosed(id) => {
-                        self.handlers.remove(&id).unwrap();
+                        let _ = self.handlers.remove(&id).unwrap();
                     }
                 }
             }
@@ -128,5 +131,4 @@ enum RouterMsg {
     AddRoute(OpaqueIpcReceiver, RouterHandler),
 }
 
-pub type RouterHandler = Box<FnMut(OpaqueIpcMessage) + Send>;
-
+pub type RouterHandler = Box<dyn FnMut(OpaqueIpcMessage) + Send>;
