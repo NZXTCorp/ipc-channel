@@ -83,8 +83,8 @@ pub fn channel() -> Result<(OsIpcSender, OsIpcReceiver),WinError> {
     let pipe_id = make_pipe_id();
     let pipe_name = make_pipe_name(&pipe_id);
 
-    let receiver = try!(OsIpcReceiver::new_named(&pipe_name));
-    let sender = try!(OsIpcSender::connect_named(&pipe_name));
+    let receiver = OsIpcReceiver::new_named(&pipe_name)?;
+    let sender = OsIpcSender::connect_named(&pipe_name)?;
 
     Ok((sender, receiver))
 }
@@ -218,7 +218,7 @@ impl<'de> serde::Deserialize<'de> for OutOfBandMessage {
         where D: serde::Deserializer<'de>
     {
         let (target_process_id, channel_handles, shmem_handles, big_data_receiver_handle) =
-            try!(serde::Deserialize::deserialize(deserializer));
+            serde::Deserialize::deserialize(deserializer)?;
         Ok(OutOfBandMessage {
             target_process_id: target_process_id,
             channel_handles: channel_handles,
@@ -769,7 +769,7 @@ impl MessageReader {
                 if oob.big_data_receiver_handle.is_some() {
                     let (handle, big_data_size) = oob.big_data_receiver_handle.unwrap();
                     let receiver = OsIpcReceiver::from_handle(WinHandle::new(handle as HANDLE));
-                    big_data = Some(try!(receiver.recv_raw(big_data_size as usize)));
+                    big_data = Some(receiver.recv_raw(big_data_size as usize)?);
                 }
             }
 
@@ -1019,12 +1019,12 @@ impl OsIpcReceiver {
         loop {
             // First, try to fetch a message, in case we have one pending
             // in the reader's receive buffer
-            if let Some((data, channels, shmems)) = try!(reader.get_message()) {
+            if let Some((data, channels, shmems)) = reader.get_message()? {
                 return Ok((data, channels, shmems));
             }
 
             // Then, issue a read if we don't have one already in flight.
-            try!(reader.start_read());
+            reader.start_read()?;
 
             // Attempt to complete the read.
             //
@@ -1032,7 +1032,7 @@ impl OsIpcReceiver {
             // The async read remains in flight in that case;
             // and another attempt at getting a result
             // can be done the next time we are called.
-            try!(reader.fetch_async_result(blocking_mode));
+            reader.fetch_async_result(blocking_mode)?;
 
             // If we're not blocking, pretend that we are blocking, since we got part of
             // a message already.  Keep reading until we get a complete message.
@@ -1192,7 +1192,7 @@ impl OsIpcSender {
 
     fn get_pipe_server_process_handle_and_pid(&self) -> Result<(WinHandle, ULONG),WinError> {
         unsafe {
-            let server_pid = try!(self.get_pipe_server_process_id());
+            let server_pid = self.get_pipe_server_process_id()?;
             if server_pid == *CURRENT_PROCESS_ID {
                 return Ok((WinHandle::new(CURRENT_PROCESS_HANDLE.as_raw()), server_pid));
             }
@@ -1221,7 +1221,7 @@ impl OsIpcSender {
     /// An internal-use-only send method that sends just raw data, with no header.
     fn send_raw(&self, data: &[u8]) -> Result<(),WinError> {
         win32_trace!("[c {:?}] writing {} bytes raw to (pid {}->{})", self.handle.as_raw(), data.len(), *CURRENT_PROCESS_ID,
-             try!(self.get_pipe_server_process_id()));
+             self.get_pipe_server_process_id()?);
 
         // Write doesn't need to be atomic,
         // since the pipe is exclusive for this message,
@@ -1241,7 +1241,7 @@ impl OsIpcSender {
         assert!(data.len() <= u32::max_value() as usize);
 
         let (server_h, server_pid) = if !shared_memory_regions.is_empty() || !ports.is_empty() {
-            try!(self.get_pipe_server_process_handle_and_pid())
+            self.get_pipe_server_process_handle_and_pid()?
         } else {
             (WinHandle::invalid(), 0)
         };
@@ -1250,23 +1250,23 @@ impl OsIpcSender {
 
         for ref shmem in shared_memory_regions {
             // shmem.handle, shmem.length
-            let mut remote_handle = try!(dup_handle_to_process(&shmem.handle, &server_h));
+            let mut remote_handle = dup_handle_to_process(&shmem.handle, &server_h)?;
             oob.shmem_handles.push((remote_handle.take_raw() as intptr_t, shmem.length as u64));
         }
 
         for port in ports {
             match port {
                 OsIpcChannel::Sender(s) => {
-                    let mut raw_remote_handle = try!(move_handle_to_process(s.handle, &server_h));
+                    let mut raw_remote_handle = move_handle_to_process(s.handle, &server_h)?;
                     oob.channel_handles.push(raw_remote_handle.take_raw() as intptr_t);
                 },
                 OsIpcChannel::Receiver(r) => {
-                    if try!(r.prepare_for_transfer()) == false {
+                    if r.prepare_for_transfer()? == false {
                         panic!("Sending receiver with outstanding partial read buffer, noooooo!  What should even happen?");
                     }
 
                     let handle = r.reader.into_inner().handle.take();
-                    let mut raw_remote_handle = try!(move_handle_to_process(handle, &server_h));
+                    let mut raw_remote_handle = move_handle_to_process(handle, &server_h)?;
                     oob.channel_handles.push(raw_remote_handle.take_raw() as intptr_t);
                 },
             }
@@ -1276,17 +1276,17 @@ impl OsIpcSender {
         let big_data_sender: Option<OsIpcSender> =
             if OsIpcSender::needs_fragmentation(data.len(), &oob) {
                 // We need to create a channel for the big data
-                let (sender, receiver) = try!(channel());
+                let (sender, receiver) = channel()?;
 
                 let (server_h, server_pid) = if server_h.is_valid() {
                     (server_h, server_pid)
                 } else {
-                    try!(self.get_pipe_server_process_handle_and_pid())
+                    self.get_pipe_server_process_handle_and_pid()?
                 };
 
                 // Put the receiver in the OOB data
                 let handle = receiver.reader.into_inner().handle.take();
-                let mut raw_receiver_handle = try!(move_handle_to_process(handle, &server_h));
+                let mut raw_receiver_handle = move_handle_to_process(handle, &server_h)?;
                 oob.big_data_receiver_handle = Some((raw_receiver_handle.take_raw() as intptr_t, data.len() as u64));
                 oob.target_process_id = server_pid;
 
@@ -1324,13 +1324,13 @@ impl OsIpcSender {
             // Write needs to be atomic, since otherwise concurrent sending
             // could result in parts of different messages getting intermixed,
             // and the receiver would not be able to extract the individual messages.
-            try!(write_buf(&self.handle, &*full_message, AtomicMode::Atomic));
+            write_buf(&self.handle, &*full_message, AtomicMode::Atomic)?;
         } else {
             full_message.extend_from_slice(&*oob_data);
             assert!(full_message.len() == full_in_band_len);
 
-            try!(write_buf(&self.handle, &*full_message, AtomicMode::Atomic));
-            try!(big_data_sender.unwrap().send_raw(data));
+            write_buf(&self.handle, &*full_message, AtomicMode::Atomic)?;
+            big_data_sender.unwrap().send_raw(data)?;
         }
 
         Ok(())
@@ -1511,7 +1511,7 @@ impl OsIpcReceiverSet {
         // Do this in a loop, because we may need to dequeue multiple packets to
         // read a complete message.
         while selection_results.is_empty() {
-            let (mut reader, result) = try!(self.fetch_iocp_result());
+            let (mut reader, result) = self.fetch_iocp_result()?;
 
             let mut closed = match result {
                 Ok(()) => false,
@@ -1521,7 +1521,7 @@ impl OsIpcReceiverSet {
 
             if !closed {
                 // Drain as many messages as we can.
-                while let Some((data, channels, shmems)) = try!(reader.get_message()) {
+                while let Some((data, channels, shmems)) = reader.get_message()? {
                     win32_trace!("[# {:?}] receiver {:?} ({}) got a message", self.iocp.as_raw(), reader.get_raw_handle(), reader.entry_id.unwrap());
                     selection_results.push(OsIpcSelectionResult::DataReceived(reader.entry_id.unwrap(), data, channels, shmems));
                 }
@@ -1694,7 +1694,7 @@ impl OsIpcOneShotServer {
     pub fn new() -> Result<(OsIpcOneShotServer, String),WinError> {
         let pipe_id = make_pipe_id();
         let pipe_name = make_pipe_name(&pipe_id);
-        let receiver = try!(OsIpcReceiver::new_named(&pipe_name));
+        let receiver = OsIpcReceiver::new_named(&pipe_name)?;
         Ok((
             OsIpcOneShotServer {
                 receiver: receiver,
@@ -1706,7 +1706,7 @@ impl OsIpcOneShotServer {
     pub fn new_with_security(security_attributes: &mut SECURITY_ATTRIBUTES) -> Result<(OsIpcOneShotServer, String), WinError> {
         let pipe_id = make_pipe_id();
         let pipe_name = make_pipe_name(&pipe_id);
-        let receiver = try!(OsIpcReceiver::new_named_with_security(&pipe_name, security_attributes));
+        let receiver = OsIpcReceiver::new_named_with_security(&pipe_name, security_attributes)?;
         Ok((
             OsIpcOneShotServer {
                 receiver: receiver,
@@ -1717,18 +1717,18 @@ impl OsIpcOneShotServer {
     }
 
     pub fn new_named(pipe_name: &str) -> Result<OsIpcOneShotServer, Error> {
-        let name = try!(CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
-            .map_err(|err| Error::new(ErrorKind::Other, err)));
-        let receiver = try!(OsIpcReceiver::new_named(&name));
+        let name = CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
+            .map_err(|err| Error::new(ErrorKind::Other, err))?;
+        let receiver = OsIpcReceiver::new_named(&name)?;
         Ok(OsIpcOneShotServer {
             receiver: receiver
         })
     }
 
     pub fn new_named_with_security(pipe_name: &str, security_attributes: &mut SECURITY_ATTRIBUTES) -> Result<OsIpcOneShotServer, Error> {
-        let name = try!(CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
-            .map_err(|err| Error::new(ErrorKind::Other, err)));
-        let receiver = try!(OsIpcReceiver::new_named_with_security(&name, security_attributes));
+        let name = CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
+            .map_err(|err| Error::new(ErrorKind::Other, err))?;
+        let receiver = OsIpcReceiver::new_named_with_security(&name, security_attributes)?;
         Ok(OsIpcOneShotServer {
             receiver: receiver
         })
@@ -1739,8 +1739,8 @@ impl OsIpcOneShotServer {
                                    Vec<OsOpaqueIpcChannel>,
                                    Vec<OsIpcSharedMemory>),WinError> {
         let receiver = self.receiver;
-        try!(receiver.accept());
-        let (data, channels, shmems) = try!(receiver.recv());
+        receiver.accept()?;
+        let (data, channels, shmems) = receiver.recv()?;
         Ok((receiver, data, channels, shmems))
     }
 }
