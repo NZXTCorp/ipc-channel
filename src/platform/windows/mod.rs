@@ -220,10 +220,10 @@ impl<'de> serde::Deserialize<'de> for OutOfBandMessage {
         let (target_process_id, channel_handles, shmem_handles, big_data_receiver_handle) =
             serde::Deserialize::deserialize(deserializer)?;
         Ok(OutOfBandMessage {
-            target_process_id: target_process_id,
-            channel_handles: channel_handles,
-            shmem_handles: shmem_handles,
-            big_data_receiver_handle: big_data_receiver_handle
+            target_process_id,
+            channel_handles,
+            shmem_handles,
+            big_data_receiver_handle
         })
     }
 }
@@ -324,7 +324,7 @@ impl PartialEq for WinHandle {
 
 impl WinHandle {
     fn new(h: HANDLE) -> WinHandle {
-        WinHandle { h: h }
+        WinHandle { h }
     }
 
     fn invalid() -> WinHandle {
@@ -459,7 +459,7 @@ impl Drop for MessageReader {
 impl MessageReader {
     fn new(handle: WinHandle) -> MessageReader {
         MessageReader {
-            handle: handle,
+            handle,
             read_buf: Vec::new(),
             async: None,
             entry_id: None,
@@ -1154,7 +1154,7 @@ impl OsIpcSender {
 
     fn from_handle(handle: WinHandle) -> OsIpcSender {
         OsIpcSender {
-            handle: handle,
+            handle,
             nosync_marker: PhantomData,
         }
     }
@@ -1658,9 +1658,9 @@ impl OsIpcSharedMemory {
             }
 
             Ok(OsIpcSharedMemory {
-                handle: handle,
+                handle,
                 ptr: address as *mut u8,
-                length: length
+                length
             })
         }
     }
@@ -1697,7 +1697,7 @@ impl OsIpcOneShotServer {
         let receiver = OsIpcReceiver::new_named(&pipe_name)?;
         Ok((
             OsIpcOneShotServer {
-                receiver: receiver,
+                receiver,
             },
             pipe_id.to_string()
         ))
@@ -1709,7 +1709,7 @@ impl OsIpcOneShotServer {
         let receiver = OsIpcReceiver::new_named_with_security(&pipe_name, security_attributes)?;
         Ok((
             OsIpcOneShotServer {
-                receiver: receiver,
+                receiver,
             },
             pipe_id.to_string()
         ))
@@ -1721,7 +1721,7 @@ impl OsIpcOneShotServer {
             .map_err(|err| Error::new(ErrorKind::Other, err))?;
         let receiver = OsIpcReceiver::new_named(&name)?;
         Ok(OsIpcOneShotServer {
-            receiver: receiver
+            receiver
         })
     }
 
@@ -1730,7 +1730,7 @@ impl OsIpcOneShotServer {
             .map_err(|err| Error::new(ErrorKind::Other, err))?;
         let receiver = OsIpcReceiver::new_named_with_security(&name, security_attributes)?;
         Ok(OsIpcOneShotServer {
-            receiver: receiver
+            receiver
         })
     }
 
@@ -1769,7 +1769,7 @@ impl Drop for OsOpaqueIpcChannel {
 impl OsOpaqueIpcChannel {
     fn new(handle: WinHandle) -> OsOpaqueIpcChannel {
         OsOpaqueIpcChannel {
-            handle: handle,
+            handle,
         }
     }
 

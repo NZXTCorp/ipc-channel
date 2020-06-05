@@ -31,8 +31,8 @@ impl RouterProxy {
         thread::spawn(move || Router::new(msg_receiver, wakeup_receiver).run());
         RouterProxy {
             comm: Mutex::new(RouterProxyComm {
-                msg_sender: msg_sender,
-                wakeup_sender: wakeup_sender,
+                msg_sender,
+                wakeup_sender,
             }),
         }
     }
@@ -91,9 +91,9 @@ impl Router {
         let mut ipc_receiver_set = IpcReceiverSet::new().unwrap();
         let msg_wakeup_id = ipc_receiver_set.add(wakeup_receiver).unwrap();
         Router {
-            msg_receiver: msg_receiver,
-            msg_wakeup_id: msg_wakeup_id,
-            ipc_receiver_set: ipc_receiver_set,
+            msg_receiver,
+            msg_wakeup_id,
+            ipc_receiver_set,
             handlers: HashMap::new(),
         }
     }

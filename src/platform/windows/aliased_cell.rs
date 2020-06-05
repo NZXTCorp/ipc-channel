@@ -151,7 +151,7 @@ mod tests {
     impl Mutator {
         unsafe fn new(addr: *mut [i32; 4]) -> Mutator {
             Mutator {
-                addr: addr,
+                addr,
                 ascended: false,
             }
         }
