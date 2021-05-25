@@ -7,6 +7,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! Inter-process communication.
+
 use platform::{self, OsIpcChannel, OsIpcReceiver, OsIpcReceiverSet, OsIpcSender};
 use platform::{OsIpcOneShotServer, OsIpcSelectionResult, OsIpcSharedMemory, OsOpaqueIpcChannel};
 
@@ -447,6 +449,7 @@ pub struct OpaqueIpcReceiver {
     os_receiver: OsIpcReceiver,
 }
 
+/// A server associated with a given name.
 pub struct IpcOneShotServer<T> {
     os_server: OsIpcOneShotServer,
     phantom: PhantomData<T>,

@@ -52,3 +52,4 @@ pub mod router;
 mod test;
 
 pub use bincode::{Error, ErrorKind};
+pub use ipc::IpcOneShotServer;

@@ -7,6 +7,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! Windows-specific features.
+
 use serde;
 use bincode;
 use libc::intptr_t;
@@ -375,7 +377,7 @@ struct AsyncData {
 // OVERLAPPED doesn't implement Debug so can't derive it, this should do but probably needs better formatting
 impl std::fmt::Debug for AsyncData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "AsyncData {{ handle: {:?}, OVERLAPPED {{ Internal: {}, InternalHigh: {}, Offset: {}, OffsetHigh: {} }} buf: {:?} }}", 
+        write!(f, "AsyncData {{ handle: {:?}, OVERLAPPED {{ Internal: {}, InternalHigh: {}, Offset: {}, OffsetHigh: {} }} buf: {:?} }}",
             self.handle, self.ov.Internal, self.ov.InternalHigh, unsafe{ self.ov.u.s().Offset }, unsafe{ self.ov.u.s().OffsetHigh }, self.buf)
     }
 }
@@ -1057,6 +1059,10 @@ impl OsIpcReceiver {
     /// Do a pipe connect.
     ///
     /// Only used for one-shot servers.
+    ///
+    /// When `timeout` is not specified the current thread is blocked
+    /// until a new connection is established or an error occurs.
+    /// Otherwise it waits for the specified time and exits with [`WinError::Timeout`].
     fn accept(&self, timeout: Option<Duration>) -> Result<(),WinError> {
         unsafe {
             let reader_borrow = self.reader.borrow();
@@ -1770,6 +1776,9 @@ impl OsIpcOneShotServer {
         Ok((receiver, data, channels, shmems))
     }
 
+    /// Accept a new incoming connection from this listener.
+    ///
+    /// This function will block the calling thread until a new client connection is established.
     pub fn accept(self) -> Result<(OsIpcReceiver,
                                    Vec<u8>,
                                    Vec<OsOpaqueIpcChannel>,
@@ -1778,6 +1787,9 @@ impl OsIpcOneShotServer {
         self.accept_impl(None)
     }
 
+    /// Tries to accept a new client connection until `timeout` expires.
+    ///
+    /// The return error would be [`WinError::Timeout`] or other error in case of failure.
     pub fn try_accept(self, timeout: Duration) -> Result<(OsIpcReceiver,
                                    Vec<u8>,
                                    Vec<OsOpaqueIpcChannel>,

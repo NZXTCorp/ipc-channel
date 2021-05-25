@@ -7,6 +7,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! Platform-specific features.
+
 #[cfg(all(not(feature = "force-inprocess"), any(target_os = "linux",
                                                 target_os = "openbsd",
                                                 target_os = "freebsd")))]
