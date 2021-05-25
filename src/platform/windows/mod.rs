@@ -1113,6 +1113,7 @@ impl OsIpcReceiver {
                     let mut nbytes: u32 = 0;
                     let ok = GetOverlappedResult(handle.as_raw(), ov.alias_mut().deref_mut(), &mut nbytes, TRUE);
                     if ok == FALSE {
+                        ov.into_inner();
                         return Err(WinError::last("GetOverlappedResult[ConnectNamedPipe]"));
                     }
                     Ok(())
