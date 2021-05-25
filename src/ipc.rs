@@ -19,6 +19,7 @@ use std::io::{Error, ErrorKind};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
+use std::time::Duration;
 
 #[cfg(feature = "async")]
 use futures::{Async, Poll, Stream};
@@ -487,9 +488,9 @@ impl<T> IpcOneShotServer<T> where T: for<'de> Deserialize<'de> + Serialize {
         })
     }
 
-    pub fn accept(self) -> Result<(IpcReceiver<T>,T), bincode::Error> {
+    fn accept_impl(self, timeout: Option<Duration>) -> Result<(IpcReceiver<T>,T), bincode::Error> {
         let (os_receiver, data, os_channels, os_shared_memory_regions) =
-            self.os_server.accept()?;
+            self.os_server.accept_impl(timeout)?;
         let value = OpaqueIpcMessage {
             data,
             os_ipc_channels: os_channels,
@@ -502,6 +503,20 @@ impl<T> IpcOneShotServer<T> where T: for<'de> Deserialize<'de> + Serialize {
             os_receiver,
             phantom: PhantomData,
         }, value))
+    }
+
+    /// Accept a new incoming connection from this listener.
+    ///
+    /// This function will block the calling thread until a new client connection is established.
+    pub fn accept(self) -> Result<(IpcReceiver<T>,T), bincode::Error> {
+        self.accept_impl(None)
+    }
+
+    /// Tries to accept a new client connection until `timeout` expires.
+    ///
+    /// The return error would be [`WinError::Timeout`] or other error in case of failure.
+    pub fn try_accept(self, timeout: Duration) -> Result<(IpcReceiver<T>,T), bincode::Error> {
+        self.accept_impl(Some(timeout))
     }
 }
 

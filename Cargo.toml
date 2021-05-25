@@ -34,4 +34,4 @@ futures = { version = "0.1", optional = true }
 crossbeam = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["errhandlingapi", "fileapi", "handleapi", "ioapiset", "memoryapi", "minwindef", "namedpipeapi", "processthreadsapi", "winerror", "winnt"] }
+winapi = { version = "0.3", features = ["errhandlingapi", "fileapi", "handleapi", "ioapiset", "memoryapi", "minwindef", "namedpipeapi", "processthreadsapi", "synchapi", "winerror", "winnt"] }

@@ -24,6 +24,8 @@ use test::{fork, Wait};
 #[cfg(not(any(feature = "force-inprocess", target_os = "android", target_os = "ios")))]
 use test::{get_channel_name_arg, spawn_server};
 
+use crate::platform::os::WinError;
+
 #[test]
 fn simple() {
     let (tx, rx) = platform::channel().unwrap();
@@ -634,6 +636,48 @@ fn server_accept_first() {
         server.accept().unwrap();
     assert_eq!((&received_data[..], received_channels, received_shared_memory_regions),
                (data, vec![], vec![]));
+}
+
+#[test]
+fn server_try_accept_timeout() {
+    let (server, name) = OsIpcOneShotServer::new().unwrap();
+    let data: &[u8] = b"1234567";
+
+    thread::spawn(move || {
+        eprintln!("client: sleep");
+        thread::sleep(Duration::from_millis(1000));
+
+        eprintln!("client: connect");
+        let tx = OsIpcSender::connect(name).unwrap();
+        tx.send(data, vec![], vec![]).unwrap();
+    });
+
+    eprintln!("server: accept");
+    let err = server.try_accept(Duration::from_millis(500)).unwrap_err();
+    eprintln!("server: accept {:?}", err);
+
+    assert_eq!(err, WinError::Timeout);
+}
+
+#[test]
+fn server_try_accept_success() {
+    let (server, name) = OsIpcOneShotServer::new().unwrap();
+    let data: &[u8] = b"1234567";
+
+    thread::spawn(move || {
+        eprintln!("client: sleep");
+        thread::sleep(Duration::from_millis(500));
+
+        eprintln!("client: connect");
+        let tx = OsIpcSender::connect(name).unwrap();
+        tx.send(data, vec![], vec![]).unwrap();
+    });
+
+    eprintln!("server: accept");
+    let ok = server.try_accept(Duration::from_millis(1000));
+    eprintln!("server: accept {:?}", ok.is_ok());
+
+    assert!(ok.is_ok());
 }
 
 #[test]

@@ -23,12 +23,13 @@ use std::ops::{Deref, DerefMut, RangeFrom};
 use std::ptr;
 use std::slice;
 use std::thread;
+use std::time::Duration;
 use uuid::Uuid;
 use winapi::shared::basetsd::ULONG_PTR;
 use winapi::shared::ntdef::{HANDLE, WCHAR};
 use winapi::shared::minwindef::{DWORD, FALSE, LPVOID, TRUE, ULONG};
-use winapi::shared::winerror::{ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, 
-    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_PIPE_CONNECTED};
+use winapi::shared::winerror::{ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE,
+    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_FOUND, ERROR_PIPE_CONNECTED, WAIT_TIMEOUT};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::fileapi::{CreateFileA, OPEN_EXISTING, ReadFile, WriteFile};
 use winapi::um::handleapi::{CloseHandle, DuplicateHandle, INVALID_HANDLE_VALUE};
@@ -38,10 +39,11 @@ use winapi::um::memoryapi::{FILE_MAP_ALL_ACCESS, MapViewOfFile, UnmapViewOfFile}
 use winapi::um::minwinbase::{OVERLAPPED, SECURITY_ATTRIBUTES};
 use winapi::um::namedpipeapi::ConnectNamedPipe;
 use winapi::um::processthreadsapi::{GetCurrentProcess, GetCurrentProcessId, OpenProcess};
+use winapi::um::synchapi::{CreateEventA, WaitForSingleObject};
 use winapi::um::winbase::{CreateFileMappingA, CreateNamedPipeA, FILE_FLAG_OVERLAPPED,
     FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_FROM_SYSTEM, FormatMessageW,
     GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, INFINITE,
-    PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
+    PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, WAIT_OBJECT_0};
 use winapi::um::winnt::{DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
     FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, PAGE_READWRITE, PROCESS_DUP_HANDLE,
     SEC_COMMIT};
@@ -1055,13 +1057,16 @@ impl OsIpcReceiver {
     /// Do a pipe connect.
     ///
     /// Only used for one-shot servers.
-    fn accept(&self) -> Result<(),WinError> {
+    fn accept(&self, timeout: Option<Duration>) -> Result<(),WinError> {
         unsafe {
             let reader_borrow = self.reader.borrow();
             let handle = &reader_borrow.handle;
             // Boxing this to get a stable address is not strictly necesssary here,
             // since we are not moving the local variable around -- but better safe than sorry...
+            let event = WinHandle::new(CreateEventA(ptr::null_mut(), true as i32, false as i32, ptr::null()));
             let mut ov = AliasedCell::new(Box::new(mem::zeroed::<OVERLAPPED>()));
+            ov.alias_mut().hEvent = event.as_raw();
+
             let ok = ConnectNamedPipe(handle.as_raw(), ov.alias_mut().deref_mut());
 
             // we should always get FALSE with async IO
@@ -1085,6 +1090,26 @@ impl OsIpcReceiver {
 
                 // the connect is pending; wait for it to complete
                 ERROR_IO_PENDING => {
+                    if let Some(duration) = timeout {
+                        let ok = WaitForSingleObject(ov.alias().hEvent, duration.as_millis() as u32);
+                        match ok {
+                            WAIT_OBJECT_0 => {
+                                win32_trace!("[$ {:?}] accept (WAIT_OBJECT_0)", handle.as_raw());
+                            },
+                            WAIT_TIMEOUT => {
+                                ov.into_inner();
+                                win32_trace!("[$ {:?}] accept (WAIT_TIMEOUT)", handle.as_raw());
+                                return Err(WinError::Timeout);
+                            }
+                            _ => {
+                                let err = WinError::last("WaitForSingleObject[ConnectNamedPipe]");
+                                ov.into_inner();
+                                win32_trace!("[$ {:?}] accept (WAIT_ERROR)", handle.as_raw());
+                                return Err(err);
+                            }
+                        }
+                    }
+
                     let mut nbytes: u32 = 0;
                     let ok = GetOverlappedResult(handle.as_raw(), ov.alias_mut().deref_mut(), &mut nbytes, TRUE);
                     if ok == FALSE {
@@ -1734,14 +1759,30 @@ impl OsIpcOneShotServer {
         })
     }
 
-    pub fn accept(self) -> Result<(OsIpcReceiver,
+    pub fn accept_impl(self, timeout: Option<Duration>) -> Result<(OsIpcReceiver,
                                    Vec<u8>,
                                    Vec<OsOpaqueIpcChannel>,
                                    Vec<OsIpcSharedMemory>),WinError> {
         let receiver = self.receiver;
-        receiver.accept()?;
+        receiver.accept(timeout)?;
         let (data, channels, shmems) = receiver.recv()?;
         Ok((receiver, data, channels, shmems))
+    }
+
+    pub fn accept(self) -> Result<(OsIpcReceiver,
+                                   Vec<u8>,
+                                   Vec<OsOpaqueIpcChannel>,
+                                   Vec<OsIpcSharedMemory>),WinError>
+    {
+        self.accept_impl(None)
+    }
+
+    pub fn try_accept(self, timeout: Duration) -> Result<(OsIpcReceiver,
+                                   Vec<u8>,
+                                   Vec<OsOpaqueIpcChannel>,
+                                   Vec<OsIpcSharedMemory>),WinError>
+    {
+        self.accept_impl(Some(timeout))
     }
 }
 
@@ -1787,6 +1828,7 @@ pub enum WinError {
     WindowsResult(u32),
     ChannelClosed,
     NoData,
+    Timeout,
 }
 
 impl WinError {
@@ -1858,6 +1900,9 @@ impl From<WinError> for Error {
             WinError::WindowsResult(err) => {
                 Error::from_raw_os_error(err as i32)
             },
+            WinError::Timeout => {
+                Error::from_raw_os_error(WAIT_TIMEOUT as i32)
+            }
         }
     }
 }
