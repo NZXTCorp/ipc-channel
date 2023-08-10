@@ -288,6 +288,11 @@ impl<T> IpcReceiver<T> where T: for<'de> Deserialize<'de> + Serialize {
             os_receiver: self.os_receiver,
         }
     }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_sender_process_id(&self) -> Result<u32, bincode::Error> {
+        Ok(self.os_receiver.get_sender_process_id()?)
+    }
 }
 
 impl<'de, T> Deserialize<'de> for IpcReceiver<T> {
@@ -349,6 +354,17 @@ impl<T> IpcSender<T> where T: Serialize {
     pub fn connect(name: String) -> Result<IpcSender<T>, io::Error> {
         Ok(IpcSender {
             os_sender: OsIpcSender::connect(name)?,
+            phantom: PhantomData,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn connect_named(name: String) -> Result<IpcSender<T>, io::Error> {
+        use std::ffi::CString;
+        let pipe_name = CString::new(format!("\\\\.\\pipe\\{}", name))
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        Ok(IpcSender {
+            os_sender: OsIpcSender::connect_named(&pipe_name)?,
             phantom: PhantomData,
         })
     }
@@ -776,6 +792,34 @@ impl<T> IpcOneShotServer<T> where T: for<'de> Deserialize<'de> + Serialize {
             phantom: PhantomData,
         }, name))
     }
+
+    #[cfg(target_os = "windows")]
+    pub fn new_named(pipe_name: &str) -> Result<IpcOneShotServer<T>, io::Error> {
+        let os_server = OsIpcOneShotServer::new_named(pipe_name)?;
+        Ok(IpcOneShotServer {
+            os_server,
+            phantom: PhantomData,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn new_named_with_security(pipe_name: &str, security_attributes: &mut winapi::um::minwinbase::SECURITY_ATTRIBUTES) -> Result<IpcOneShotServer<T>, io::Error> {
+        let os_server = OsIpcOneShotServer::new_named_with_security(pipe_name, security_attributes)?;
+        Ok(IpcOneShotServer {
+            os_server,
+            phantom: PhantomData,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn new_with_security(security_attributes: &mut winapi::um::minwinbase::SECURITY_ATTRIBUTES) -> Result<(IpcOneShotServer<T>, String), io::Error> {
+        let (os_server, name) = OsIpcOneShotServer::new_with_security(security_attributes)?;
+        Ok((IpcOneShotServer {
+            os_server,
+            phantom: PhantomData,
+        }, name))
+    }
+
 
     pub fn accept(self) -> Result<(IpcReceiver<T>,T), bincode::Error> {
         let (os_receiver, data, os_channels, os_shared_memory_regions) =
