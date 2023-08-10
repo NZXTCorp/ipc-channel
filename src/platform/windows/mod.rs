@@ -32,7 +32,9 @@ use std::time::Duration;
 use uuid::Uuid;
 use winapi::um::winnt::{HANDLE};
 use winapi::um::handleapi::{INVALID_HANDLE_VALUE};
-use winapi::shared::minwindef::{TRUE, FALSE, LPVOID};
+use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
+use winapi::um::winbase::{GetNamedPipeClientProcessId, CreateNamedPipeA, PIPE_ACCESS_INBOUND, FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS};
+use winapi::shared::minwindef::{TRUE, FALSE, LPVOID, ULONG};
 use winapi;
 use winapi::um::synchapi::CreateEventA;
 
@@ -1040,6 +1042,29 @@ impl OsIpcReceiver {
         }
     }
 
+    fn new_named_with_security(pipe_name: &CString, security_attributes: &mut SECURITY_ATTRIBUTES) -> Result<OsIpcReceiver,WinError> {
+        unsafe {
+            // create the pipe server
+            let handle =
+                CreateNamedPipeA(pipe_name.as_ptr(),
+                                 PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                                 // 1 max instance of this pipe
+                                 1,
+                                 // out/in buffer sizes
+                                 0, PIPE_BUFFER_SIZE as u32,
+                                 0, // default timeout for WaitNamedPipe (0 == 50ms as default)
+                                 security_attributes);
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(WinError::last("CreateNamedPipeA"));
+            }
+
+            Ok(OsIpcReceiver {
+                reader: RefCell::new(MessageReader::new(WinHandle::new(handle))),
+            })
+        }
+    }
+
     fn prepare_for_transfer(&self) -> Result<bool,WinError> {
         let mut reader = self.reader.borrow_mut();
         // cancel any outstanding IO request
@@ -1164,6 +1189,18 @@ impl OsIpcReceiver {
     fn recv_raw(self, size: usize) -> Result<Vec<u8>, WinError> {
         self.reader.into_inner().read_raw_sized(size)
     }
+
+    pub fn get_sender_process_id(&self) -> Result<ULONG, WinError> {
+        unsafe {
+            let reader_borrow = self.reader.borrow();
+            let handle = &reader_borrow.handle;
+            let mut process_id = 0;
+            if GetNamedPipeClientProcessId(handle.as_raw(), &mut process_id) == FALSE {
+                return Err(WinError::last("GetNamedPipeClientProcessId"));
+            }
+            Ok(process_id)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1201,7 +1238,7 @@ impl OsIpcSender {
     }
 
     /// Connect to a pipe server.
-    fn connect_named(pipe_name: &CString) -> Result<OsIpcSender,WinError> {
+    pub(crate) fn connect_named(pipe_name: &CString) -> Result<OsIpcSender,WinError> {
         unsafe {
             let handle =
                 winapi::um::fileapi::CreateFileA(pipe_name.as_ptr(),
@@ -1737,6 +1774,38 @@ impl OsIpcOneShotServer {
             pipe_id.to_string()
         ))
     }
+
+    pub fn new_with_security(security_attributes: &mut SECURITY_ATTRIBUTES) -> Result<(OsIpcOneShotServer, String), WinError> {
+        let pipe_id = make_pipe_id();
+        let pipe_name = make_pipe_name(&pipe_id);
+        let receiver = OsIpcReceiver::new_named_with_security(&pipe_name, security_attributes)?;
+        Ok((
+            OsIpcOneShotServer {
+                receiver,
+            },
+            pipe_id.to_string()
+        ))
+
+    }
+
+    pub fn new_named(pipe_name: &str) -> Result<OsIpcOneShotServer, io::Error> {
+        let name = CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let receiver = OsIpcReceiver::new_named(&name)?;
+        Ok(OsIpcOneShotServer {
+            receiver
+        })
+    }
+
+    pub fn new_named_with_security(pipe_name: &str, security_attributes: &mut SECURITY_ATTRIBUTES) -> Result<OsIpcOneShotServer, io::Error> {
+        let name = CString::new(format!("\\\\.\\pipe\\{}", pipe_name))
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let receiver = OsIpcReceiver::new_named_with_security(&name, security_attributes)?;
+        Ok(OsIpcOneShotServer {
+            receiver
+        })
+    }
+
 
     pub fn accept(self) -> Result<(OsIpcReceiver,
                                    Vec<u8>,
