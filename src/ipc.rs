@@ -366,8 +366,7 @@ where
         })
     }
 
-    /// Send data across the channel to the receiver.
-    pub fn send(&self, data: T) -> Result<(), bincode::Error> {
+    fn send_internal(&self, data: &T) -> Result<(), bincode::Error> {
         let mut bytes = Vec::with_capacity(4096);
         OS_IPC_CHANNELS_FOR_SERIALIZATION.with(|os_ipc_channels_for_serialization| {
             OS_IPC_SHARED_MEMORY_REGIONS_FOR_SERIALIZATION.with(
@@ -398,6 +397,15 @@ where
                 },
             )
         })
+    }
+
+    /// Send data across the channel to the receiver.
+    pub fn send(&self, data: T) -> Result<(), bincode::Error> {
+        self.send_internal(&data)
+    }
+
+    pub fn send_clone(&self, data: &T) -> Result<(), bincode::Error> where T: Clone {
+        self.send_internal(data)
     }
 
     pub fn to_opaque(self) -> OpaqueIpcSender {
